@@ -1,11 +1,15 @@
 
-country_name <- "Brazil"
-crop <- "sugarcane"
+# country_name <- "Brazil"
+country_name <- "India"
 
 
+
+# *****************************************************************************
 
 library(tidyverse)
 library(stars)
+
+source("https://raw.github.com/carlosdobler/spatial-routines/master/general_tools.R")
 
 # template grid
 grid_template <- 
@@ -34,186 +38,329 @@ grid_country <-
 
 
 
-# load production map
+# load yield map
 spam <- 
-  "/mnt/bucket_mine/misc_data/agriculture/spam/spam2020/production/spam2020_v1r0_global_P_SUGC_A.tif" %>% 
+  "/mnt/bucket_mine/misc_data/agriculture/spam/spam2020/yield/spam2020_v1r0_global_Y_SUGC_A.tif" %>% 
   read_stars()
 
 spam_f <- 
   spam %>% 
-  st_warp(grid_country) %>% 
   setNames("spam") %>% 
-  mutate(spam = if_else(is.na(spam) | spam <= 0.1, 0.1, spam))
-
+  mutate(spam = if_else(is.na(spam), 0, spam)) %>% 
+  st_warp(grid_country, use_gdal = T, method = "average") %>% 
+  setNames("spam")
+  
+st_dimensions(spam_f) <- st_dimensions(grid_country)
 
 
 # load yield data
-"gsutil cp gs://clim_data_reg_useast1/misc_data/agriculture/official_stats/brazil/brazil_sugarcane_production_2000-2023.gpkg /mnt/pers_disk/" %>% 
-  system()
+if(country_name == "Brazil") {
+  
+  "gsutil cp gs://clim_data_reg_useast1/misc_data/agriculture/official_stats/brazil/brazil_sugarcane_production_2000-2023.gpkg /mnt/pers_disk/" %>%
+    system()
 
-yield_pol <- 
-  "/mnt/pers_disk/brazil_sugarcane_production_2000-2023.gpkg" %>% 
+  "gsutil cp gs://clim_data_reg_useast1/misc_data/agriculture/official_stats/brazil/brazil_sugarcane_area_2000-2023.gpkg /mnt/pers_disk/" %>%
+    system()
+  
+} else if (country_name == "India") {
+  
+  "gsutil cp gs://clim_data_reg_useast1/misc_data/agriculture/official_stats/india/india_sugarcane_area_2000-2023.gpkg /mnt/pers_disk/" %>% 
+    system()
+  
+  "gsutil cp gs://clim_data_reg_useast1/misc_data/agriculture/official_stats/india/india_sugarcane_production_2000-2023.gpkg /mnt/pers_disk/" %>% 
+    system()
+  
+}
+
+
+
+pol <- 
+  "/mnt/pers_disk/{str_to_lower(country_name)}_sugarcane_production_2000-2023.gpkg" %>% 
+  str_glue() %>% 
   read_sf()
 
-yield_pol <- 
-  yield_pol %>% 
+df_production <- 
+  pol %>% 
+  st_drop_geometry()
+
+df_area <- 
+  "/mnt/pers_disk/{str_to_lower(country_name)}_sugarcane_area_2000-2023.gpkg" %>% 
+  str_glue() %>% 
+  read_sf() %>%  
+  st_drop_geometry()
+
+pol <- 
+  pol %>% 
+  select(1:3) %>% 
   st_transform(crs = 4326)
 
-spam_per_region <- 
+
+# create weights
+
+# sum per municiplaity (denominator)
+spam_total <- 
   spam_f %>% 
-  aggregate(yield_pol, sum) %>%
+  aggregate(pol, sum) %>%
   st_as_sf() %>% 
   st_rasterize(grid_country) %>% 
-  setNames("total_spam")
+  setNames("total")
 
-st_dimensions(spam_per_region) <- st_dimensions(grid_country)
+st_dimensions(spam_total) <- st_dimensions(grid_country)
 
 w <- 
-  c(spam_f, spam_per_region) %>%
-  mutate(w = spam/total_spam) %>% 
+  c(spam_f, spam_total) %>%
+  mutate(w = spam/total) %>% 
   select(w)
 
-# check
-# foo <- 
-#   w %>% 
-#   aggregate(yield_pol, sum) %>% 
-#   st_as_sf()
-
-
-
-yield_mean <- 
-  yield_pol %>% 
-  st_drop_geometry() %>%
-  pivot_longer(-c(1:3), names_to = "year") %>%
-  mutate(value = as.numeric(value),
-         value = if_else(is.na(value), 0, value)) %>% 
-  group_by(CD_MICRO, Microregion) %>% 
-  summarize(value = mean(value, na.rm = T))
-
-yield_pol_mean <- 
-  yield_pol %>% 
-  select(1,3) %>% 
-  left_join(yield_mean, by = c("CD_MICRO", "Microregion"))
-
-
-
-yield_r_mean <- 
-  yield_pol_mean %>% 
-  select(value) %>% 
-  st_rasterize(grid_country) %>% 
-  st_warp(grid_country)
-
-
-yield_f_r <- 
-  c(yield_r_mean, w) %>% 
-  mutate(value = value * w) %>% 
-  select(value)
-
-# # check
+# # check: all 1?
 # foo <-
-#   yield_f_r %>%
-#   aggregate(yield_pol, sum) %>%
+#   w %>%
+#   aggregate(pol, sum) %>%
 #   st_as_sf()
 # 
-# yield_mean %>%
-#   ungroup() %>% 
-#   mutate(r = foo$value)
-
-
-
-ggplot(yield_pol_mean) +
-  geom_sf(aes(fill = value), color = NA) +
-  colorspace::scale_fill_continuous_sequential("viridis",
-                                               trans = "sqrt",
-                                               rev = F)
-
-
-
-yield_pol_mean %>% 
-  st_rasterize(grid_country) %>% 
-  as_tibble() %>% 
-  ggplot() +
-  geom_raster(aes(x, y, fill = value)) +
-  colorspace::scale_fill_continuous_sequential("viridis",
-                                               trans = "sqrt",
-                                               rev = F)
-
-
-
-yield_f_r %>% 
-  as_tibble() %>%
-  mutate(value = value/10) %>% 
-  mutate(value = if_else(value > 3e5, 3e5, value)) %>% 
-  ggplot() +
-  geom_raster(aes(x, y, fill = value)) +
-  scale_fill_viridis_c(option = "viridis",
-                       trans = "sqrt",
-                       na.value = "transparent",
-                       name = "tonnes",
-                       breaks = c(0, 1e5, 3e5),
-                       labels = c("0", "1e5", "> 3e5"),
-                       guide = guide_colorbar(barheight = 0.6,      
-                                              barwidth = 10,
-                                              title.position = "top")) +
-  coord_equal() +
-  theme(legend.position = "bottom",
-        axis.title = element_blank()) +
-  labs(title = "Mean sugarcane production",
-       subtitle = "2000 - 2023")
-
-
-spam_f %>%
-  setNames("value") %>% 
-  c(yield_f_r) %>% 
-  mutate(value = if_else(is.na(value.1), NA, value)) %>% 
-  as_tibble() %>% 
-  ggplot() +
-  geom_raster(aes(x, y, fill = value)) +
-  colorspace::scale_fill_continuous_sequential("viridis",
-                                               trans = "sqrt",
-                                               rev = F,
-                                               na.value = "transparent") +
-  coord_equal()
+# foo$w
 
 
 
 
+# calculate yield
+
+if (country_name == "Brazil") {
+  col_n <- 1:3
+  col_names <- c("CD_MICRO", "State", "Microregion")
+  
+} else if (country_name == "India"){
+  col_n <- 1:4
+  col_names <- c("State", "District", "VARNAME_2")
+  
+}
+  
+
+df_yield <-
+  full_join(
+    df_production %>%
+      pivot_longer(-all_of(col_n), names_to = "year", values_to = "production"),
+    df_area %>%
+      pivot_longer(-all_of(col_n), names_to = "year", values_to = "area"),
+    by = c(col_names, "year")
+  )
+
+if (country_name == "Brazil") {
+  df_yield <- 
+    df_yield %>% 
+    mutate(across(year:area, ~as.numeric(.x))) %>%
+    mutate(yield = production/area,
+           yield = if_else(is.na(yield), 0, yield)) %>%
+    select(-production, -area)
+  
+} else if (country_name == "India") {
+  df_yield <- 
+    df_yield %>% 
+    select(-starts_with("S.No.")) %>%
+    mutate(year = str_sub(year, end = 4)) %>% 
+    mutate(across(year:area, ~as.numeric(.x))) %>%
+    mutate(yield = production/area,
+           yield = if_else(is.na(yield) | is.infinite(yield), 0, yield)) %>%
+    select(-production, -area)
+  
+}
 
 
-s_agrclim <- 
-  "/mnt/bucket_mine/cmip6/nex/seasonal/GFDL-ESM4/biologically_effective_degree_days/bedd-10_seas_GFDL-ESM4_2030-2039.nc" %>% 
-  read_ncdf()
-
-s_agrclim_f <- 
-  s_agrclim %>%
-  st_warp(st_as_stars(st_bbox(), dx = 0.25)) %>% 
-  st_crop(grid_country)
-
-
-s_agrclim_seas <- 
-  c(3,6,9,12) %>% 
-  map(\(mon){
+# df_yield %>%
+#   ggplot(aes(year, yield, group = CD_MICRO, color = CD_MICRO)) +
+#   geom_line(show.legend = F)
+# 
+# df_production <-
+#   df_production %>%
+#   pivot_longer(-c(1:3), names_to = "year", values_to = "production") %>%
+#   mutate(across(year:production, ~as.numeric(.x)))
+# 
+# df_production %>%
+#   ggplot(aes(year, production, group = CD_MICRO, color = CD_MICRO)) +
+#   geom_line(show.legend = F)
     
-    s_agrclim_f %>% 
-      filter(month(time) == mon) %>% 
-      st_apply(c(1,2), mean)
+
+
+yield_r_annual <- 
+  # map(2000:2023, \(yr){
+  map(2000:2022, \(yr){
+    
+    # yr <- 2000
+    
+    yield_r_1yr <- 
+      pol %>% 
+      left_join(df_yield %>% filter(year == yr),
+                by = col_names
+                ) %>% 
+      select(yield) %>% 
+      st_rasterize(grid_country) %>% 
+      st_warp(grid_country) %>% 
+      
+      c(w) %>% 
+      mutate(yield = yield * w) %>% 
+      select(yield)
+    
+    # # check
+    # foo <-
+    #   yield_r_1yr %>%
+    #   aggregate(pol, sum) %>%
+    #   st_as_sf()
+    # 
+    # df_yield %>% 
+    #   filter(year == yr) %>%
+    #   mutate(r = foo$yield)
+    
+    return(yield_r_1yr)
     
   })
 
-do.call(c, c(s_agrclim_seas, along = "seas")) %>% 
-  st_set_dimensions(3, values = c("MAM", "JJA", "SON", "DJF")) %>% 
-  as_tibble() %>% 
-  ggplot(aes(x,y, fill = mean)) +
-  geom_raster() +
-  scale_fill_viridis_c(option = "magma",
-                       na.value = "transparent",
-                       name = "°C",
-                       guide = guide_colorbar(barheight = 0.6,      
-                                              barwidth = 10,
-                                              title.position = "top")) +
-  coord_equal(expand = F) +
-  facet_wrap(~seas, ncol = 2) +
-  theme(axis.title = element_blank(),
-        legend.position = "bottom") +
-  labs(title = "Projected biologically effective degree days",
-       subtitle = "1930-1940")
+
+yield_r_annual <- 
+  yield_r_annual %>% 
+  # set_names(2000:2023) %>%
+  set_names(2000:2022) %>% 
+  {do.call(c, c(., along = "time"))}
+
+yield_decile_r_annual <- 
+  yield_r_annual %>% 
+  st_apply(c(1,2), \(x){
+    
+    if(all(is.na(x)) | all(x == 0)){
+      rep(NA, length(x))
+    } else {
+      round(ecdf(x)(x),1)
+    }
+  
+  },
+  .fname = "time") %>% 
+  aperm(c(2,3,1))
+
+yield_anom_r_annual <- 
+  yield_r_annual %>% 
+  st_apply(c(1,2), \(x){
+    
+    if(all(is.na(x)) | all(x == 0)){
+      rep(NA, length(x))
+    } else {
+      x-mean(x)
+    }
+    
+  },
+  .fname = "time") %>% 
+  aperm(c(2,3,1))
+
+
+dir_yield <- "/mnt/pers_disk/agr_yield"
+# fs::dir_create(dir_yield)
+
+yield_r_annual %>% 
+  # st_set_dimensions(3, values = seq(as_date("2000-01-01"), as_date("2023-01-01"), by = "1 year")) %>% 
+  st_set_dimensions(3, values = seq(as_date("2000-01-01"), as_date("2022-01-01"), by = "1 year")) %>%
+  rt_write_nc(str_glue("{dir_yield}/yield_{str_to_lower(country_name)}_annual.nc"), daily = F)
+
+yield_decile_r_annual %>% 
+  st_set_dimensions(3, values = seq(as_date("2000-01-01"), as_date("2023-01-01"), by = "1 year")) %>% 
+  rt_write_nc(str_glue("{dir_yield}/yield_{str_to_lower(country_name)}_annual_decile.nc"), daily = F)
+
+yield_anom_r_annual %>% 
+  st_set_dimensions(3, values = seq(as_date("2000-01-01"), as_date("2023-01-01"), by = "1 year")) %>% 
+  rt_write_nc(str_glue("{dir_yield}/yield_{str_to_lower(country_name)}_annual_anom.nc"), daily = F)
+
+
+# 
+# ggplot(yield_pol_mean) +
+#   geom_sf(aes(fill = value), color = NA) +
+#   colorspace::scale_fill_continuous_sequential("viridis",
+#                                                trans = "sqrt",
+#                                                rev = F)
+# 
+# 
+# 
+# yield_pol_mean %>% 
+#   st_rasterize(grid_country) %>% 
+#   as_tibble() %>% 
+#   ggplot() +
+#   geom_raster(aes(x, y, fill = value)) +
+#   colorspace::scale_fill_continuous_sequential("viridis",
+#                                                trans = "sqrt",
+#                                                rev = F)
+# 
+# 
+# 
+# yield_f_r %>% 
+#   as_tibble() %>%
+#   mutate(value = value/10) %>% 
+#   mutate(value = if_else(value > 3e5, 3e5, value)) %>% 
+#   ggplot() +
+#   geom_raster(aes(x, y, fill = value)) +
+#   scale_fill_viridis_c(option = "viridis",
+#                        trans = "sqrt",
+#                        na.value = "transparent",
+#                        name = "tonnes",
+#                        breaks = c(0, 1e5, 3e5),
+#                        labels = c("0", "1e5", "> 3e5"),
+#                        guide = guide_colorbar(barheight = 0.6,      
+#                                               barwidth = 10,
+#                                               title.position = "top")) +
+#   coord_equal() +
+#   theme(legend.position = "bottom",
+#         axis.title = element_blank()) +
+#   labs(title = "Mean sugarcane production",
+#        subtitle = "2000 - 2023")
+# 
+# 
+# spam_f %>%
+#   setNames("value") %>% 
+#   c(yield_f_r) %>% 
+#   mutate(value = if_else(is.na(value.1), NA, value)) %>% 
+#   as_tibble() %>% 
+#   ggplot() +
+#   geom_raster(aes(x, y, fill = value)) +
+#   colorspace::scale_fill_continuous_sequential("viridis",
+#                                                trans = "sqrt",
+#                                                rev = F,
+#                                                na.value = "transparent") +
+#   coord_equal()
+# 
+# 
+# 
+# 
+# 
+# 
+# s_agrclim <- 
+#   "/mnt/bucket_mine/cmip6/nex/seasonal/GFDL-ESM4/biologically_effective_degree_days/bedd-10_seas_GFDL-ESM4_2030-2039.nc" %>% 
+#   read_ncdf()
+# 
+# s_agrclim_f <- 
+#   s_agrclim %>%
+#   st_warp(st_as_stars(st_bbox(), dx = 0.25)) %>% 
+#   st_crop(grid_country)
+# 
+# 
+# s_agrclim_seas <- 
+#   c(3,6,9,12) %>% 
+#   map(\(mon){
+#     
+#     s_agrclim_f %>% 
+#       filter(month(time) == mon) %>% 
+#       st_apply(c(1,2), mean)
+#     
+#   })
+# 
+# do.call(c, c(s_agrclim_seas, along = "seas")) %>% 
+#   st_set_dimensions(3, values = c("MAM", "JJA", "SON", "DJF")) %>% 
+#   as_tibble() %>% 
+#   ggplot(aes(x,y, fill = mean)) +
+#   geom_raster() +
+#   scale_fill_viridis_c(option = "magma",
+#                        na.value = "transparent",
+#                        name = "°C",
+#                        guide = guide_colorbar(barheight = 0.6,      
+#                                               barwidth = 10,
+#                                               title.position = "top")) +
+#   coord_equal(expand = F) +
+#   facet_wrap(~seas, ncol = 2) +
+#   theme(axis.title = element_blank(),
+#         legend.position = "bottom") +
+#   labs(title = "Projected biologically effective degree days",
+#        subtitle = "1930-1940")
